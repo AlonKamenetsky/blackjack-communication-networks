@@ -11,6 +11,9 @@ from common.protocol import (
 UDP_PORT = 13122
 ZERO_CARD = b"\x00\x00\x00"
 
+UDP_TIMEOUT_SEC = 10
+TCP_TIMEOUT_SEC = 30
+
 
 def recv_exact(sock: socket.socket, n: int) -> bytes:
     chunks = []
@@ -49,13 +52,9 @@ def read_one_payload(tcp_sock: socket.socket):
 
 
 def play_one_round(tcp_sock: socket.socket) -> int:
-    """
-    Plays one round over an existing TCP connection.
-    Returns RESULT_WIN / RESULT_LOSS / RESULT_TIE.
-    """
+    print("\n--- New round ---")
 
     # Initial deal: 2 player cards + 1 visible dealer card
-    print("\n--- New round ---")
     for i in range(3):
         result, card_bytes = read_one_payload(tcp_sock)
         rank, suit = decode_card(card_bytes)
@@ -65,7 +64,8 @@ def play_one_round(tcp_sock: socket.socket) -> int:
         else:
             print(f"Dealer (visible) got: {card_to_str(rank, suit)}")
 
-    # Player decisions
+        # result should be NOT_OVER here, but we don't rely on it
+
     while True:
         choice = input("Hit or Stand? ").strip().lower()
         decision = DECISION_HIT if choice.startswith("h") else DECISION_STAND
@@ -73,7 +73,7 @@ def play_one_round(tcp_sock: socket.socket) -> int:
         tcp_sock.sendall(build_payload(decision, RESULT_NOT_OVER, ZERO_CARD))
 
         if decision == DECISION_HIT:
-            # After HIT: server sends exactly one card (NOT_OVER) OR sends final result (LOSS) with no card
+            # One payload back: card + (NOT_OVER or final)
             result, card_bytes = read_one_payload(tcp_sock)
 
             if card_bytes != ZERO_CARD:
@@ -84,11 +84,8 @@ def play_one_round(tcp_sock: socket.socket) -> int:
                 print(f"Round result: {result_to_str(result)}")
                 return result
 
-            # otherwise, continue asking Hit/Stand
-
         else:
-            # After STAND: server will reveal dealer hidden card and maybe more,
-            # then send final result. We just keep reading until result != NOT_OVER.
+            # Keep reading dealer reveals/draws until final result
             while True:
                 result, card_bytes = read_one_payload(tcp_sock)
 
@@ -101,59 +98,76 @@ def play_one_round(tcp_sock: socket.socket) -> int:
                     return result
 
 
-def main():
-    client_name = input("Enter client/team name: ").strip() or "Client"
-
+def ask_rounds() -> int:
     while True:
         try:
             rounds = int(input("How many rounds? (1-255): ").strip())
             if 1 <= rounds <= 255:
-                break
+                return rounds
         except ValueError:
             pass
         print("Please enter a number between 1 and 255.")
 
-    # --- UDP listen for offers ---
-    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp_sock.bind(("", UDP_PORT))
 
-    print(f"Client started, listening for offer requests on UDP {UDP_PORT}...")
+def main():
+    client_name = input("Enter client/team name: ").strip() or "Client"
 
-    while True:
-        data, addr = udp_sock.recvfrom(2048)
-        server_ip = addr[0]
+    try:
+        while True:
+            rounds = ask_rounds()
 
-        try:
-            tcp_port, server_name = parse_offer(data)
-        except ValueError:
-            continue
+            udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp_sock.settimeout(UDP_TIMEOUT_SEC)
+            udp_sock.bind(("", UDP_PORT))
 
-        print(f"Received offer from {server_ip} (name={server_name}, tcp_port={tcp_port})")
-        udp_sock.close()
+            print(f"Client started, listening for offer requests on UDP {UDP_PORT}...")
 
-        # --- TCP connect ---
-        tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        tcp_sock.connect((server_ip, tcp_port))
+            try:
+                while True:
+                    try:
+                        data, addr = udp_sock.recvfrom(2048)
+                    except socket.timeout:
+                        print("No offers yet... still listening.")
+                        continue
 
-        tcp_sock.sendall(build_request(rounds, client_name))
-        print("Sent request to server over TCP")
+                    server_ip = addr[0]
+                    try:
+                        tcp_port, server_name = parse_offer(data)
+                    except ValueError:
+                        continue
 
-        wins = 0
-        ties = 0
+                    print(f"Received offer from {server_ip} (name={server_name}, tcp_port={tcp_port})")
+                    break
+            finally:
+                udp_sock.close()
 
-        try:
-            for _ in range(rounds):
-                result = play_one_round(tcp_sock)
-                if result == RESULT_WIN:
-                    wins += 1
-                elif result == RESULT_TIE:
-                    ties += 1
-        finally:
-            tcp_sock.close()
+            tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            tcp_sock.settimeout(TCP_TIMEOUT_SEC)
 
-        win_rate = wins / rounds
-        print(f"\nFinished playing {rounds} rounds, win rate: {win_rate}")
-        return
+            try:
+                tcp_sock.connect((server_ip, tcp_port))
+                tcp_sock.sendall(build_request(rounds, client_name))
+                print("Sent request to server over TCP")
+
+                wins = 0
+                ties = 0
+
+                for _ in range(rounds):
+                    result = play_one_round(tcp_sock)
+                    if result == RESULT_WIN:
+                        wins += 1
+                    elif result == RESULT_TIE:
+                        ties += 1
+
+                win_rate = wins / rounds
+                print(f"\nFinished playing {rounds} rounds, win rate: {win_rate}")
+
+            finally:
+                tcp_sock.close()
+
+    except KeyboardInterrupt:
+        print("\nClient stopped.")
+
 
 
 if __name__ == "__main__":
