@@ -1,11 +1,10 @@
 import socket
-import time
 import random
 
 from common.protocol import (
     build_offer, parse_request, REQUEST_SIZE,
     build_payload, parse_payload, PAYLOAD_SIZE,
-    encode_card, decode_card,
+    encode_card,
     DECISION_HIT, DECISION_STAND,
     RESULT_NOT_OVER, RESULT_WIN, RESULT_LOSS, RESULT_TIE
 )
