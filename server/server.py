@@ -1,5 +1,8 @@
 import socket
 import random
+import time
+
+import select
 
 from common.protocol import (
     build_offer, parse_request, REQUEST_SIZE,
@@ -25,6 +28,7 @@ def get_local_ip() -> str:
 
 
 def recv_exact(sock: socket.socket, n: int) -> bytes:
+    # cannot
     chunks = []
     received = 0
     while received < n:
@@ -143,39 +147,43 @@ def main():
     print(f"Server started, listening on IP address {ip}")
     print(f"Broadcasting offers on UDP {UDP_PORT}, advertising TCP port {tcp_port}")
 
+    offer_pkt = build_offer(tcp_port, server_name)
+    last_offer_time = 0
+    OFFER_INTERVAL = 1.0  # seconds
+
     try:
         while True:
-            offer_pkt = build_offer(tcp_port, server_name)
-            udp_sock.sendto(offer_pkt, (BROADCAST_IP, UDP_PORT))
+            now = time.time()
 
-            tcp_sock.settimeout(1.0)
-            try:
+            # Send UDP offer once per second
+            if now - last_offer_time >= OFFER_INTERVAL:
+                udp_sock.sendto(offer_pkt, (BROADCAST_IP, UDP_PORT))
+                last_offer_time = now
+
+            # Wait until TCP socket is ready (or timeout expires)
+            readable, _, _ = select.select([tcp_sock], [], [], OFFER_INTERVAL)
+
+            if tcp_sock in readable:
                 conn, addr = tcp_sock.accept()
-            except socket.timeout:
-                continue
-            finally:
-                tcp_sock.settimeout(None)
+                client_ip = addr[0]
+                print(f"TCP client connected from {client_ip}")
 
-            client_ip = addr[0]
-            print(f"TCP client connected from {client_ip}")
+                try:
+                    data = recv_exact(conn, REQUEST_SIZE)
+                    rounds, client_name = parse_request(data)
+                    print(f"Request: client_name={client_name}, rounds={rounds}")
 
-            try:
-                data = recv_exact(conn, REQUEST_SIZE)
-                rounds, client_name = parse_request(data)
-                print(f"Request: client_name={client_name}, rounds={rounds}")
+                    for i in range(rounds):
+                        print(f"Starting round {i + 1}/{rounds}")
+                        play_one_round(conn)
 
-                for i in range(rounds):
-                    print(f"Starting round {i + 1}/{rounds}")
-                    play_one_round(conn)
+                    print("Finished all rounds for this client")
 
-                print("Finished all rounds for this client")
-
-
-            except Exception as e:
-                print(f"Error during session: {e}")
-            finally:
-                conn.close()
-                print("Client disconnected")
+                except Exception as e:
+                    print(f"Error during session: {e}")
+                finally:
+                    conn.close()
+                    print("Client disconnected")
 
     except KeyboardInterrupt:
         print("\nServer stopped.")
